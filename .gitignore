@@ -1,0 +1,26 @@
+# Dependencias de Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Base de datos local (inventario y ventas)
+database.db
+database.db-wal
+database.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Variables de entorno con las llaves de Supabase
+.env
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Copias de la base de datos (incluidas las que genera el respaldo)
+copias/
+*.backup

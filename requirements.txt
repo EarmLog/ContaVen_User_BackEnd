@@ -1,0 +1,6 @@
+# Dependencias del backend de usuarios de ContaVen (Flask)
+Flask==3.0.3
+Flask-Cors==4.0.1
+python-dotenv==1.0.1
+requests==2.32.3
+PyJWT[crypto]==2.9.0
