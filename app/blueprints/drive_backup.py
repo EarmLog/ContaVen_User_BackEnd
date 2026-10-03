@@ -15,12 +15,10 @@ Endpoints:
 
 import json
 import time
-from pathlib import Path
 
 from flask import Blueprint, g, jsonify, request
 
-from ..config import config
-from ..database import obtener_conexion, usuario_actual
+from ..database import obtener_conexion, respaldo_de_usuario, usuario_actual
 from ..services import drive_service
 from .auth import cargar_usuario_autenticado
 
@@ -144,13 +142,17 @@ def callback_drive():
 
 # ------------------------------------------------------------
 # POST /api/drive/copia
-# Sube una copia del archivo SQLite a la carpeta del usuario
+# Sube una copia de los datos del usuario a su carpeta de Google Drive
 # ------------------------------------------------------------
 @rutas_drive.post("/copia")
 def crear_copia():
     """
-    Sube el archivo SQLite con el inventario y las ventas del usuario a
-    su carpeta "ContaVen - <id del usuario>" en Google Drive.
+    Sube el inventario, las ventas y los ajustes del usuario a su carpeta
+    "ContaVen - <id del usuario>" en Google Drive.
+
+    Antes se subía el archivo SQLite entero. Ahora que los datos viven en
+    Postgres no hay archivo en disco que mandar, así que se arma un JSON
+    con los datos del usuario y se sube directo desde memoria.
     """
     error, codigo = cargar_usuario_autenticado()
     if error:
@@ -170,15 +172,22 @@ def crear_copia():
     except drive_service.ErrorDrive as error_drive:
         return jsonify({"error": error_drive.mensaje}), error_drive.estado
 
+    # Se arma el respaldo con los datos que hay guardados
+    respaldo = respaldo_de_usuario(usuario_id)
+    contenido = json.dumps(respaldo, ensure_ascii=False, indent=2).encode("utf-8")
+
+    if not respaldo["productos"] and not respaldo["ventas"]:
+        return jsonify({"error": "Todavía no hay datos para respaldar."}), 400
+
     # El nombre del archivo lleva la fecha y la hora
     marca_tiempo = time.strftime("%Y%m%d_%H%M%S")
-    nombre_archivo = f"respaldo_contaven_{marca_tiempo}.db"
+    nombre_archivo = f"respaldo_contaven_{marca_tiempo}.json"
 
     try:
-        id_archivo = drive_service.subir_archivo(
+        id_archivo = drive_service.subir_contenido(
             token,
             carpeta_id,
-            Path(config.RUTA_BASE_DATOS),
+            contenido,
             nombre_archivo,
         )
     except drive_service.ErrorDrive as error_drive:
@@ -189,6 +198,8 @@ def crear_copia():
         "carpeta": nombre_carpeta,
         "archivo": nombre_archivo,
         "id_archivo": id_archivo,
+        "productos": len(respaldo["productos"]),
+        "ventas": len(respaldo["ventas"]),
     })
 
 
@@ -254,34 +265,29 @@ def _pagina_final(exito: bool, mensaje: str, detalle: str = "") -> str:
 
 
 def _guardar_tokens(usuario_id: str, tokens: dict) -> None:
-    """Guarda el token de Google Drive del usuario en la base local."""
-    conexion = obtener_conexion()
-    try:
+    """Guarda el token de Google Drive del usuario en la base."""
+    with obtener_conexion() as conexion:
         conexion.execute(
             """
             INSERT INTO configuracion (usuario_id, clave, valor)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             ON CONFLICT(usuario_id, clave) DO UPDATE SET
-                valor = excluded.valor,
-                actualizado_en = datetime('now', 'localtime')
+                valor = excluded.valor
             """,
             (usuario_id, "token_drive", json.dumps(tokens)),
         )
         conexion.commit()
-    finally:
-        conexion.close()
 
 
 def _leer_tokens(usuario_id: str) -> dict:
     """Lee los tokens de Google Drive guardados; si no hay, devuelve vacío."""
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         fila = conexion.execute(
-            "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = ?",
+            "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = %s",
             (usuario_id, "token_drive"),
         ).fetchone()
-    finally:
-        conexion.close()
+
+        conexion.commit()
 
     if not fila or not fila["valor"]:
         return {}

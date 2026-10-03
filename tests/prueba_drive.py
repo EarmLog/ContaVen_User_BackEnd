@@ -15,18 +15,23 @@ poder comprobar toda la lógica de nuestro lado:
 
 Esta prueba corre en el mismo proceso del backend (Flask test client),
 así que no hace falta levantar el servidor. Para usarla:
-    python prueba_drive.py
+
+    USUARIO_PRUEBA_ID=<uuid-de-un-usuario-real> python prueba_drive.py
+
+Necesita un usuario que exista en Supabase, porque la tabla configuracion
+tiene clave foránea a auth.users.
 """
 
 import json
+import os
 import re
 import sys
 import time
 import urllib.parse as up
+import uuid
 from unittest import mock
 
 import requests
-import sys
 from pathlib import Path
 
 # Se añade la raíz del backend al path para poder importar "app"
@@ -38,7 +43,15 @@ from app import app
 from app.database import obtener_conexion
 
 # --- Datos del usuario falso con el que se hacen las pruebas ---
-USUARIO_ID = "usuario-de-prueba-0001"
+#
+# La tabla configuracion tiene usuario_id como uuid con clave foránea a
+# auth.users, así que la prueba necesita un usuario de verdad: no vale un
+# texto inventado como antes con SQLite. Se indica con la variable de
+# entorno USUARIO_PRUEBA_ID y tiene que existir en Supabase.
+#
+# Las pruebas borran sus propias filas de configuracion (solo la clave
+# token_drive), así que no tocan el inventario ni las ventas del usuario.
+USUARIO_ID = os.getenv("USUARIO_PRUEBA_ID", "").strip()
 NOMBRE_CARPETA = f"ContaVen - {USUARIO_ID}"
 FECHA_LICENCIA = "2099-12-31"
 
@@ -183,16 +196,28 @@ def perfil_falso(_usuario_id):
 def main() -> None:
     print("=== COPIA DE SEGURIDAD EN GOOGLE DRIVE ===\n")
 
-    # Se limpia lo que haya quedado de pruebas anteriores de este usuario
-    conexion = obtener_conexion()
+    # Sin un usuario real la prueba no puede ni empezar: la base rechazaría
+    # el id. Se avisa aquí con el motivo claro.
+    if not USUARIO_ID:
+        print("Falta la variable de entorno USUARIO_PRUEBA_ID.\n")
+        print("Esta prueba escribe en la tabla configuracion, que exige un")
+        print("usuario existente en Supabase. Usa uno de prueba, por ejemplo:\n")
+        print("    USUARIO_PRUEBA_ID=<uuid> python prueba_drive.py\n")
+        sys.exit(1)
+
     try:
+        uuid.UUID(USUARIO_ID)
+    except ValueError:
+        print(f"USUARIO_PRUEBA_ID no es un uuid válido: {USUARIO_ID!r}")
+        sys.exit(1)
+
+    # Se limpia lo que haya quedado de pruebas anteriores de este usuario
+    with obtener_conexion() as conexion:
         conexion.execute(
-            "DELETE FROM configuracion WHERE usuario_id = ? AND clave = ?",
+            "DELETE FROM configuracion WHERE usuario_id = %s AND clave = %s",
             (USUARIO_ID, "token_drive"),
         )
         conexion.commit()
-    finally:
-        conexion.close()
 
     cliente = app.test_client()
     cab = sesion_falsa()
@@ -300,15 +325,12 @@ def main() -> None:
         # --- 6. Renovación del token ---
         print("\n6. El token se renueva solo cuando caduca")
 
-        conexion = obtener_conexion()
-        try:
+        with obtener_conexion() as conexion:
             fila = conexion.execute(
-                "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = ?",
+                "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = %s",
                 (USUARIO_ID, "token_drive"),
             ).fetchone()
             guardado = json.loads(fila["valor"]) if fila else {}
-        finally:
-            conexion.close()
 
         revisar(guardado.get("refresh_token") == "refresh_token_NUEVO",
                 "se guardó el refresh_token, que es lo que permite seguir respaldando")
@@ -318,18 +340,15 @@ def main() -> None:
         caducado["expires_at"] = time.time() - 10
         caducado["access_token"] = "access_token_VIEJO"
 
-        conexion = obtener_conexion()
-        try:
+        with obtener_conexion() as conexion:
             conexion.execute(
                 """
-                INSERT INTO configuracion (usuario_id, clave, valor) VALUES (?, ?, ?)
+                INSERT INTO configuracion (usuario_id, clave, valor) VALUES (%s, %s, %s)
                 ON CONFLICT(usuario_id, clave) DO UPDATE SET valor = excluded.valor
                 """,
                 (USUARIO_ID, "token_drive", json.dumps(caducado)),
             )
             conexion.commit()
-        finally:
-            conexion.close()
 
         llamadas.clear()
         with parche_google(llamadas):
@@ -341,15 +360,12 @@ def main() -> None:
             (isinstance(c, tuple) and c[0] == "renovar_token") for c in llamadas),
             "se pidió un token nuevo a Google")
 
-        conexion = obtener_conexion()
-        try:
+        with obtener_conexion() as conexion:
             fila = conexion.execute(
-                "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = ?",
+                "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = %s",
                 (USUARIO_ID, "token_drive"),
             ).fetchone()
             renovar = json.loads(fila["valor"])
-        finally:
-            conexion.close()
 
         revisar(renovar.get("access_token") == "access_token_RENOVADO",
                 "el token vencido se guardó reemplazado, sin molestar al usuario")
@@ -358,38 +374,32 @@ def main() -> None:
         print("\n7. Google solo da refresh_token la primera vez")
         # Se borra el refresh_token como si nunca se hubiera recibido,
         # y se comprueba que al reconectar no se pierda el que ya había
-        conexion = obtener_conexion()
-        try:
+        with obtener_conexion() as conexion:
             fila = conexion.execute(
-                "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = ?",
+                "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = %s",
                 (USUARIO_ID, "token_drive"),
             ).fetchone()
             sin_refresh = json.loads(fila["valor"])
             sin_refresh["refresh_token"] = ""
             conexion.execute(
                 """
-                INSERT INTO configuracion (usuario_id, clave, valor) VALUES (?, ?, ?)
+                INSERT INTO configuracion (usuario_id, clave, valor) VALUES (%s, %s, %s)
                 ON CONFLICT(usuario_id, clave) DO UPDATE SET valor = excluded.valor
                 """,
                 (USUARIO_ID, "token_drive", json.dumps(sin_refresh)),
             )
             conexion.commit()
-        finally:
-            conexion.close()
 
         with parche_google([]):
             cliente.get("/api/drive/callback",
                         query_string={"code": "OTRO_CODIGO", "state": USUARIO_ID})
 
-        conexion = obtener_conexion()
-        try:
+        with obtener_conexion() as conexion:
             fila = conexion.execute(
-                "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = ?",
+                "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = %s",
                 (USUARIO_ID, "token_drive"),
             ).fetchone()
             final = json.loads(fila["valor"])
-        finally:
-            conexion.close()
 
         revisar(final.get("refresh_token") == "refresh_token_NUEVO",
                 "al reconectar se conserva el refresh_token que ya se tenía")
@@ -446,15 +456,12 @@ def main() -> None:
                 "muestra un mensaje entendible")
 
     # --- Limpieza ---
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         conexion.execute(
-            "DELETE FROM configuracion WHERE usuario_id IN (?, ?)",
-            (USUARIO_ID, "otro-usuario-9999"),
+            "DELETE FROM configuracion WHERE usuario_id = %s AND clave = %s",
+            (USUARIO_ID, "token_drive"),
         )
         conexion.commit()
-    finally:
-        conexion.close()
 
     print("\n" + "=" * 60)
     if fallos:

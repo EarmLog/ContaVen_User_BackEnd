@@ -1,12 +1,12 @@
 """
-ContaVen - Backend de la app de USUARIOS (Flask + SQLite).
+ContaVen - Backend de la app de USUARIOS (Flask + Supabase Postgres).
 
 Este paquete junta el servidor y lo divide en piezas:
 
     app/
       __init__.py      -> fábrica de la aplicación (create_app) y CORS
       config.py        -> variables del archivo .env
-      database.py      -> conexión a SQLite y dueño de cada dato
+      database.py      -> conexión a Postgres y dueño de cada dato
       blueprints/      -> las rutas de la API, divididas por módulo
       services/        -> lógica de terceros (Supabase, Drive, dólar)
       utils/           -> funciones de apoyo (validación, sanitización)
@@ -26,11 +26,7 @@ from .blueprints.drive_backup import rutas_drive
 from .blueprints.productos import rutas_productos
 from .blueprints.ventas import rutas_ventas
 from .config import config
-from .database import (
-    crear_tablas,
-    migrar_esquema_por_usuario,
-    verificar_archivo,
-)
+from .database import comprobar_conexion
 
 
 def crear_aplicacion() -> Flask:
@@ -57,39 +53,29 @@ def crear_aplicacion() -> Flask:
     return app
 
 
-def preparar_base_de_datos() -> None:
-    """
-    Revisa que el archivo de la base de datos se pueda escribir y
-    después crea las tablas que falten.
-
-    Si el archivo no tiene permiso de escritura se detiene el arranque
-    con un mensaje que dice exactamente qué comando ejecutar para
-    arreglarlo, en vez de dejar que falle cada consulta con un error
-    poco claro.
-    """
-    verificar_archivo()
-    crear_tablas()
-    # Actualiza bases de datos viejas que no tenían la columna usuario_id
-    migrar_esquema_por_usuario()
-
-
 def crear_app() -> Flask:
     """
-    Punto único de arranque: prepara la base de datos y devuelve la app.
+    Punto único de arranque: comprueba que se pueda conectar a la base y
+    devuelve la app.
 
-    Se separa de crear_aplicacion() para que las pruebas puedan armar
-    la aplicación sin tocar la base de datos real.
+    Se separa de crear_aplicacion() para que las pruebas puedan armar la
+    aplicación sin tocar la base de datos real.
+
+    Ya no hace falta crear tablas ni migrar el esquema: en Postgres el
+    esquema se aplica con un archivo de migración versionado, y la base
+    solo se abre para confirmar que responde.
     """
     try:
-        preparar_base_de_datos()
-    except PermissionError as error_permiso:
-        # Si el archivo no es escribible, se avisa y se detiene el arranque
+        comprobar_conexion()
+    except RuntimeError as error_conexion:
+        # Sin conexión no tiene sentido arrancar: se avisa con el motivo
+        # exacto y se detiene, en vez de dejar que falle cada consulta
         print(f"\n{'=' * 60}")
-        print("  No se pudo preparar la base de datos local")
+        print("  No se pudo conectar con la base de datos")
         print(f"{'=' * 60}\n")
-        print(error_permiso)
+        print(error_conexion)
         print()
-        raise SystemExit(1) from error_permiso
+        raise SystemExit(1) from error_conexion
 
     return crear_aplicacion()
 

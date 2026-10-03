@@ -8,12 +8,10 @@ Endpoints:
   DELETE /api/productos/<id>   -> elimina un producto
 """
 
-import sqlite3
-
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from ..config import config
-from ..database import obtener_conexion, usuario_actual
+from ..database import fila_limpia, obtener_conexion, usuario_actual
 from ..utils.security import a_numero, a_texto
 from .auth import cargar_usuario_autenticado
 
@@ -26,7 +24,7 @@ rutas_productos = Blueprint("productos", __name__, url_prefix="/api/productos")
 # ------------------------------------------------------------
 @rutas_productos.get("")
 def listar_productos():
-    """Trae todos los productos guardados en el SQLite local."""
+    """Trae todos los productos guardados en Postgres."""
     error, codigo = cargar_usuario_autenticado()
     if error:
         return error, codigo
@@ -34,23 +32,18 @@ def listar_productos():
     # Solo se traen los productos del usuario que tiene la sesión iniciada
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         filas = conexion.execute(
             """
             SELECT * FROM productos
-            WHERE usuario_id = ?
-            ORDER BY nombre COLLATE NOCASE ASC
+            WHERE usuario_id = %s
+            ORDER BY lower(nombre) ASC
             """,
             (duenio,),
         ).fetchall()
 
-        # Se convierte cada fila de SQLite en un diccionario normal
-        productos = [dict(fila) for fila in filas]
+        productos = [fila_limpia(fila) for fila in filas]
         return jsonify({"productos": productos})
-
-    finally:
-        conexion.close()
 
 
 # ------------------------------------------------------------
@@ -59,7 +52,7 @@ def listar_productos():
 # ------------------------------------------------------------
 @rutas_productos.post("")
 def crear_producto():
-    """Recibe los datos del formulario de producto y lo guarda en SQLite."""
+    """Recibe los datos del formulario de producto y lo guarda en Postgres."""
     error, codigo = cargar_usuario_autenticado()
     if error:
         return error, codigo
@@ -101,20 +94,21 @@ def crear_producto():
         precio_compra_ves, precio_compra_usd
     )
 
-    # --- Se inserta el producto en SQLite ---
+    # --- Se inserta el producto en Postgres ---
     # El usuario_id sale del token de sesión, nunca del cuerpo del pedido
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
-        cursor = conexion.execute(
+    with obtener_conexion() as conexion:
+        # RETURNING devuelve la fila ya guardada, sin necesidad de consultarla
+        fila = conexion.execute(
             """
             INSERT INTO productos (
                 usuario_id, nombre, stock, tipo, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
             """,
             (
                 duenio,
@@ -122,19 +116,11 @@ def crear_producto():
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
             ),
-        )
-        conexion.commit()
-
-        # Se devuelve el producto recién creado
-        fila = conexion.execute(
-            "SELECT * FROM productos WHERE id = ? AND usuario_id = ?",
-            (cursor.lastrowid, duenio),
         ).fetchone()
 
-        return jsonify({"mensaje": "Producto agregado.", "producto": dict(fila)}), 201
+        conexion.commit()
 
-    finally:
-        conexion.close()
+        return jsonify({"mensaje": "Producto agregado.", "producto": fila_limpia(fila)}), 201
 
 
 # ------------------------------------------------------------
@@ -180,20 +166,20 @@ def editar_producto(id_producto: int):
         precio_compra_ves, precio_compra_usd
     )
 
-    # --- Se actualiza el producto en SQLite ---
-    # El WHERE incluye usuario_id para no poder editar productos ajenos
+    # --- Se actualiza el producto en Postgres ---
+    # El WHERE incluye usuario_id para no poder editar productos ajenos.
+    # "actualizado_en" lo pone un trigger de la base, no hace falta aquí.
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
-        cursor = conexion.execute(
+    with obtener_conexion() as conexion:
+        fila = conexion.execute(
             """
             UPDATE productos SET
-                nombre = ?, stock = ?, tipo = ?, descripcion = ?, sku = ?,
-                precio_ves = ?, precio_usd = ?,
-                precio_compra_ves = ?, precio_compra_usd = ?,
-                actualizado_en = datetime('now', 'localtime')
-            WHERE id = ? AND usuario_id = ?
+                nombre = %s, stock = %s, tipo = %s, descripcion = %s, sku = %s,
+                precio_ves = %s, precio_usd = %s,
+                precio_compra_ves = %s, precio_compra_usd = %s
+            WHERE id = %s AND usuario_id = %s
+            RETURNING *
             """,
             (
                 nombre, stock_numero, tipo, descripcion, sku,
@@ -201,22 +187,15 @@ def editar_producto(id_producto: int):
                 precio_compra_ves, precio_compra_usd,
                 id_producto, duenio,
             ),
-        )
+        ).fetchone()
+
         conexion.commit()
 
         # Si no se actualizó nada, el producto no existe o no es de este usuario
-        if cursor.rowcount == 0:
+        if fila is None:
             return jsonify({"error": "Ese producto no existe."}), 404
 
-        fila = conexion.execute(
-            "SELECT * FROM productos WHERE id = ? AND usuario_id = ?",
-            (id_producto, duenio),
-        ).fetchone()
-
-        return jsonify({"mensaje": "Producto actualizado.", "producto": dict(fila)})
-
-    finally:
-        conexion.close()
+        return jsonify({"mensaje": "Producto actualizado.", "producto": fila_limpia(fila)})
 
 
 # ------------------------------------------------------------
@@ -225,7 +204,13 @@ def editar_producto(id_producto: int):
 # ------------------------------------------------------------
 @rutas_productos.delete("/<int:id_producto>")
 def eliminar_producto(id_producto: int):
-    """Elimina un producto del inventario y también sus ventas ya registradas."""
+    """
+    Elimina un producto del inventario.
+
+    Las ventas ya registradas NO se borran (el historial de ganancias se
+    conserva). Lo que pasa es que en productos_vendidos el producto_id
+    queda en NULL y el nombre que se guardó sigue ahí como respaldo.
+    """
     error, codigo = cargar_usuario_autenticado()
     if error:
         return error, codigo
@@ -233,10 +218,9 @@ def eliminar_producto(id_producto: int):
     # El WHERE incluye usuario_id para no poder borrar productos ajenos
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         cursor = conexion.execute(
-            "DELETE FROM productos WHERE id = ? AND usuario_id = ?",
+            "DELETE FROM productos WHERE id = %s AND usuario_id = %s",
             (id_producto, duenio),
         )
         conexion.commit()
@@ -246,9 +230,6 @@ def eliminar_producto(id_producto: int):
 
         return jsonify({"mensaje": "Producto eliminado."})
 
-    finally:
-        conexion.close()
-
 
 # ============================================================
 # Funciones de ayuda
@@ -256,7 +237,7 @@ def eliminar_producto(id_producto: int):
 def _completar_precios(ves: float, usd: float) -> tuple[float, float]:
     """
     Si viene un precio en una moneda y el de la otra está vacío,
-    calcula el que falta usando la tasa actual del dólar guardada en SQLite.
+    calcula el que falta usando la tasa actual del dólar guardada en la base.
     Devuelve la pareja (precio_ves, precio_usd) ya completa.
     """
     # Si ya vienen los dos precios se devuelven tal cual
@@ -289,17 +270,15 @@ def obtener_tasa_dolar() -> float:
     # La tasa del dólar es la de este usuario, no la de cualquiera
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         fila = conexion.execute(
-            "SELECT precio_ves FROM precios_dolar WHERE usuario_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT precio_ves FROM precios_dolar WHERE usuario_id = %s ORDER BY id DESC LIMIT 1",
             (duenio,),
         ).fetchone()
 
-        if fila and fila["precio_ves"]:
-            return float(fila["precio_ves"])
+        conexion.commit()
 
-        return config.PRECIO_DOLAR_POR_DEFECTO
+    if fila and fila["precio_ves"]:
+        return float(fila["precio_ves"])
 
-    finally:
-        conexion.close()
+    return config.PRECIO_DOLAR_POR_DEFECTO

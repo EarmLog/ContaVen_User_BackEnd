@@ -1,6 +1,9 @@
-# Dependencias del backend de usuarios de ContaVen (Flask)
+# Dependencias del backend de usuarios de ContaVen (Flask + Postgres)
 Flask==3.0.3
 Flask-Cors==4.0.1
 python-dotenv==1.0.1
 requests==2.32.3
 PyJWT[crypto]==2.9.0
+
+# Conexión a Postgres de Supabase. "pool" viene incluido en psycopg[binary,pool]
+psycopg[binary,pool]==3.2.3

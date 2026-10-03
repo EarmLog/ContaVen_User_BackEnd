@@ -28,7 +28,7 @@ class Config:
     PUERTO = int(os.getenv("PUERTO", 5001))
 
     # --- Supabase (autenticación y licencias) ---
-    SUPABASE_URL = os.getenv("SUPABASE_URL", "https://owhfypcyinmoaeuvqeqm.supabase.co")
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
     SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "")
     SUPABASE_PUBLISHABLE_KEY = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
     SUPABASE_JWKS_URL = os.getenv(
@@ -36,8 +36,12 @@ class Config:
         SUPABASE_URL + "/auth/v1/.well-known/jwks.json",
     )
 
-    # --- Base de datos local (SQLite) ---
-    RUTA_BASE_DATOS = str(CARPETA_BACKEND / os.getenv("RUTA_BASE_DATOS", "database.db"))
+    # --- Base de datos (Postgres de Supabase) ---
+    # Cadena de conexión directa a Postgres. Antes era un archivo SQLite
+    # local (database.db), pero en Vercel el disco es de solo lectura y se
+    # perdía en cada request, así que ahora todo vive en Postgres.
+    # Se encuentra en Supabase > Project Settings > Database > Connection string
+    DATABASE_URL = os.getenv("DATABASE_URL", "")
 
     # --- Licencia ---
     DIAS_LICENCIA_INICIAL = int(os.getenv("DIAS_LICENCIA_INICIAL", 30))

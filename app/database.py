@@ -1,295 +1,227 @@
 """
-Conexión y creación de la base de datos local (SQLite).
+Conexión a la base de datos de Postgres (Supabase).
 
-SQLite guarda SOLO lo del negocio:
+Estas tablas guardan SOLO lo del negocio:
   - productos (inventario)
   - ventas (transacciones)
   - productos_vendidos (detalle de cada venta)
   - configuracion (preferencias y tema)
   - precios_dolar (historial de tasas)
-Supabase solo se usa para autenticación y licencias.
 
-Todas las tablas de negocio llevan una columna "usuario_id" con el id del
-dueño. El backend lo saca del token de sesión y lo usa en cada consulta,
-para que un usuario nunca vea los datos de otro.
+Supabase además se usa para la autenticación y las licencias (tablas
+"perfiles" y "administradores"), pero eso lo maneja supabase_service.py
+por la API REST.
+
+ANTES estas tablas vivían en un SQLite local (database.db). Se movieron a
+Postgres porque el backend ahora corre en Vercel, donde el disco es de solo
+lectura y cada request arranca un contenedor nuevo: un archivo SQLite se
+perdería en cada invocación.
+
+Todas las tablas llevan una columna "usuario_id" con el id del dueño. El
+backend lo saca del token de sesión y lo usa en cada consulta, para que un
+usuario nunca vea los datos de otro.
+
+El esquema lo crea la migración de Supabase, no el código: ver
+supabase/migrations/20260101000500_tablas_negocio_postgres.sql
 """
 
-import getpass
-import os
-import sqlite3
-from pathlib import Path
+from datetime import date, datetime, time
+from decimal import Decimal
+
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 from .config import config
 
+# El pool se crea una sola vez por proceso. En Vercel cada función es
+# fugaz, así que se deja sin conexiones siempre abiertas y con un tope
+# bajo: si abrimos muchas, la base se queda sin conexiones libres.
+_pool: ConnectionPool | None = None
 
-def obtener_conexion() -> sqlite3.Connection:
+
+def obtener_pool() -> ConnectionPool:
     """
-    Abre una conexión nueva a la base de datos local.
+    Devuelve el pool de conexiones, creándolo la primera vez.
 
-    La conexión se abre en modo lectura-escritura (rw_uri=False) para
-    que SQLite cree el archivo si no existe, y se espera a que cualquier
-    otra conexión que lo esté usando se cierre, en vez de fallar de
-    inmediato. Eso evita el error "database is locked" cuando dos peticiones
-    del servidor coinciden.
+    Se usa el pool de transacciones de Supabase (el host aws-0-*.pooler.
+    supabase.com), que es el que funciona por IPv4 y aguanta las
+    conexiones cortas de Vercel.
     """
-    # Si el archivo está en un directorio que no existe, se crea
-    Path(config.RUTA_BASE_DATOS).parent.mkdir(parents=True, exist_ok=True)
+    global _pool
 
-    conexion = sqlite3.connect(
-        config.RUTA_BASE_DATOS,
-        timeout=30,          # Espera hasta 30 segundos si la base está ocupada
-    )
-
-    # Permite leer los rows como diccionarios en vez de tuplas
-    conexion.row_factory = sqlite3.Row
-
-    # Activa las llaves foráneas para que SQLite respete las relaciones
-    conexion.execute("PRAGMA foreign_keys = ON")
-
-    return conexion
-
-
-def verificar_archivo() -> None:
-    """
-    Revisa que el archivo de la base de datos exista y se pueda escribir.
-
-    Si el archivo está bloqueado o el proceso no tiene permiso para
-    escribirlo, se avisa con un mensaje claro. Esto pasa, por ejemplo,
-    cuando el archivo quedó con permisos de otro usuario del sistema.
-
-    Se llama al arrancar el servidor, antes de crear las tablas.
-    """
-    ruta = Path(config.RUTA_BASE_DATOS)
-
-    # Se intenta crear el archivo vacío si todavía no existe
-    if not ruta.exists():
-        ruta.touch()
-
-    if not os.access(ruta, os.W_OK):
-        raise PermissionError(
-            f"No se puede escribir en la base de datos:\n"
-            f"  {ruta}\n\n"
-            f"Tu usuario ({getpass.getuser()}) no tiene permiso de escritura sobre ese archivo.\n"
-            f"Para arreglarlo, en una terminal ejecuta:\n"
-            f"  sudo chown {getpass.getuser()}:{getpass.getuser()} {ruta}"
-        )
-
-
-def crear_tablas() -> None:
-    """
-    Crea las tablas del inventario y de las ventas si todavía no existen.
-    Se llama una sola vez al arrancar el servidor.
-    """
-    conexion = obtener_conexion()
-    try:
-        # Tabla de productos del inventario
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS productos (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id          TEXT    NOT NULL,
-                nombre              TEXT    NOT NULL,
-                stock               INTEGER NOT NULL DEFAULT 0,
-                tipo                TEXT,
-                descripcion         TEXT,
-                sku                 TEXT,
-                precio_ves          REAL    NOT NULL DEFAULT 0,
-                precio_usd          REAL    NOT NULL DEFAULT 0,
-                precio_compra_ves   REAL    NOT NULL DEFAULT 0,
-                precio_compra_usd   REAL    NOT NULL DEFAULT 0,
-                creado_en           TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-                actualizado_en      TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+    if _pool is None:
+        if not config.DATABASE_URL:
+            raise RuntimeError(
+                "Falta la variable DATABASE_URL.\n"
+                "En el .env debe estar la cadena de conexión a Postgres de Supabase:\n"
+                "  postgresql://postgres.TU_REF:TU_CONTRASENA@aws-0-REGION.pooler.supabase.com:5432/postgres\n"
+                "La encuentras en Supabase > Project Settings > Database > Connection string."
             )
-            """
+
+        _pool = ConnectionPool(
+            conninfo=config.DATABASE_URL,
+            min_size=0,
+            max_size=3,
+            timeout=15,
+            kwargs={"row_factory": dict_row},
+            open=True,
         )
 
-        # Tabla de ventas (una fila por venta registrada)
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ventas (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id          TEXT    NOT NULL,
-                fecha               TEXT    NOT NULL,
-                hora                TEXT    NOT NULL,
-                metodo_pago         TEXT    NOT NULL,
-                total_ves           REAL    NOT NULL DEFAULT 0,
-                total_usd           REAL    NOT NULL DEFAULT 0,
-                costo_total_ves     REAL    NOT NULL DEFAULT 0,
-                costo_total_usd     REAL    NOT NULL DEFAULT 0,
-                ganancia_ves        REAL    NOT NULL DEFAULT 0,
-                ganancia_usd        REAL    NOT NULL DEFAULT 0,
-                precio_dolar        REAL    NOT NULL DEFAULT 0,
-                creado_en           TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
-            )
-            """
-        )
-
-        # Tabla del detalle: qué productos se vendieron en cada venta
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS productos_vendidos (
-                id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id              TEXT    NOT NULL,
-                venta_id                INTEGER NOT NULL,
-                producto_id             INTEGER,
-                producto_nombre         TEXT    NOT NULL,
-                unidades                INTEGER NOT NULL,
-                precio_unitario_ves     REAL    NOT NULL DEFAULT 0,
-                precio_unitario_usd     REAL    NOT NULL DEFAULT 0,
-                costo_unitario_ves      REAL    NOT NULL DEFAULT 0,
-                costo_unitario_usd      REAL    NOT NULL DEFAULT 0,
-                subtotal_ves            REAL    NOT NULL DEFAULT 0,
-                subtotal_usd            REAL    NOT NULL DEFAULT 0,
-                ganancia_ves            REAL    NOT NULL DEFAULT 0,
-                ganancia_usd            REAL    NOT NULL DEFAULT 0,
-                FOREIGN KEY (venta_id) REFERENCES ventas (id) ON DELETE CASCADE,
-                FOREIGN KEY (producto_id) REFERENCES productos (id) ON DELETE SET NULL
-            )
-            """
-        )
-
-        # Tabla de preferencias del usuario (tema, auto precios, etc.)
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS configuracion (
-                usuario_id      TEXT NOT NULL,
-                clave           TEXT NOT NULL,
-                valor           TEXT,
-                actualizado_en  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-                PRIMARY KEY (usuario_id, clave)
-            )
-            """
-        )
-
-        # Tabla con el último precio del dólar conocido
-        conexion.execute(
-            """
-            CREATE TABLE IF NOT EXISTS precios_dolar (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario_id      TEXT NOT NULL,
-                precio_ves      REAL NOT NULL,
-                origen          TEXT,
-                actualizado_en  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-            )
-            """
-        )
-
-        conexion.commit()
-    finally:
-        conexion.close()
+    return _pool
 
 
-# ------------------------------------------------------------
-# Migración de una base de datos vieja (sin usuario_id)
-# ------------------------------------------------------------
-def migrar_esquema_por_usuario() -> None:
+def obtener_conexion():
     """
-    Actualiza una base de datos creada antes de que las tablas tuvieran
-    la columna "usuario_id".
+    Abre una conexión del pool.
 
-    Qué hace:
-      1. Revisa qué tablas existen y si ya tienen la columna "usuario_id".
-      2. A las que no la tienen, les agrega la columna.
-      3. Reconstruye la tabla "configuracion" para que su clave primaria
-         sea (usuario_id, clave) en vez de solo "clave".
+    Se usa como context manager, igual que en SQLite:
 
-    Las filas viejas reciben usuario_id = "" (cadena vacía). No se ven en el
-    uso normal de la app porque cada usuario busca con su propio id, así
-    que conviene respaldar la base antes de migrar y, si hay datos viejos
-    que quieras recuperar, editarlos a mano después.
+        with obtener_conexion() as conexion:
+            filas = conexion.execute("SELECT ... WHERE id = %s", (algo,)).fetchall()
+
+    Importante: a diferencia de SQLite, Postgres abre una transacción
+    sola al empezar. Por eso NO se escribe "BEGIN": basta con calling
+    commit() para confirmar y rollback() para deshacer.
     """
-    conexion = obtener_conexion()
-    try:
-        tablas = {
-            fila["name"]
-            for fila in conexion.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
+    return obtener_pool().connection()
 
-        # --- 1. Agregar usuario_id donde falte ---
-        tablas_con_duenio = [
+
+def comprobar_conexion() -> None:
+    """
+    Revisa que se pueda conectar a Postgres y que las tablas existan.
+
+    Se llama al arrancar el servidor. Si algo falla (falta el DATABASE_URL,
+    la contraseña está mal, la migración no se aplicó) se detiene con un
+    mensaje claro, en vez de dejar que cada consulta falle con un error
+    que no dice nada.
+    """
+    with obtener_conexion() as conexion:
+        # Un SELECT 1 que no necesita ninguna tabla
+        conexion.execute("SELECT 1")
+
+        # Se revisa que estén las 5 tablas de negocio
+        esperadas = {
             "productos",
             "ventas",
             "productos_vendidos",
+            "configuracion",
             "precios_dolar",
-        ]
+        }
 
-        for tabla in tablas_con_duenio:
-            if tabla not in tablas:
-                continue
+        filas = conexion.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            """
+        ).fetchall()
 
-            columnas = {
-                fila["name"]
-                for fila in conexion.execute(f"PRAGMA table_info({tabla})").fetchall()
-            }
+        existentes = {fila["table_name"] for fila in filas}
+        faltantes = esperadas - existentes
 
-            if "usuario_id" in columnas:
-                continue
-
-            print(f"[migración] Agregando columna usuario_id a la tabla {tabla}")
-            conexion.execute(
-                f"ALTER TABLE {tabla} ADD COLUMN usuario_id TEXT NOT NULL DEFAULT ''"
+        if faltantes:
+            faltantes_texto = ", ".join(sorted(faltantes))
+            raise RuntimeError(
+                "Faltan tablas en Postgres:\n"
+                f"  {faltantes_texto}\n\n"
+                "Aplícalas con:\n"
+                "  supabase db push"
             )
 
-        # --- 2. Reconstruir configuracion con clave (usuario_id, clave) ---
-        if "configuracion" in tablas:
-            columnas = {
-                fila["name"]
-                for fila in conexion.execute("PRAGMA table_info(configuracion)").fetchall()
-            }
+        conexion.commit()
 
-            necesita_reconstruir = "usuario_id" not in columnas
 
-            if not necesita_reconstruir:
-                # Ya tiene usuario_id, pero se revisa si la clave primaria
-                # sigue siendo solo "clave"
-                claves_primarias = [
-                    fila["name"]
-                    for fila in conexion.execute(
-                        "PRAGMA table_info(configuracion)"
-                    ).fetchall()
-                    if fila["pk"]
-                ]
-                necesita_reconstruir = claves_primarias == ["clave"]
+def a_json(valor):
+    """
+    Convierte un valor de Postgres a algo que jsonify pueda escribir.
 
-            if necesita_reconstruir:
-                print("[migración] Reconstruyendo la tabla configuracion por usuario")
+    Postgres devuelve los "numeric" (los precios y las ganancias) como
+    Decimal, y las fechas como date/datetime/time. jsonify no sabe
+    ninguno de los dos, así que se convierten a float y a texto.
+    """
+    if isinstance(valor, Decimal):
+        return float(valor)
 
-                conexion.execute("PRAGMA foreign_keys = OFF")
-                conexion.execute("ALTER TABLE configuracion RENAME TO configuracion_vieja")
-                conexion.execute(
-                    """
-                    CREATE TABLE configuracion (
-                        usuario_id      TEXT NOT NULL,
-                        clave           TEXT NOT NULL,
-                        valor           TEXT,
-                        actualizado_en  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-                        PRIMARY KEY (usuario_id, clave)
-                    )
-                    """
-                )
-                # Se copia lo viejo a un usuario de relleno
-                conexion.execute(
-                    """
-                    INSERT INTO configuracion (usuario_id, clave, valor, actualizado_en)
-                    SELECT '', clave, valor, actualizado_en FROM configuracion_vieja
-                    """
-                )
-                conexion.execute("DROP TABLE configuracion_vieja")
-                conexion.execute("PRAGMA foreign_keys = ON")
+    if isinstance(valor, datetime):
+        return valor.isoformat(sep=" ", timespec="seconds")
 
-        # Índices para que las consultas por usuario vaya rápido
-        for tabla in ("productos", "ventas", "productos_vendidos", "precios_dolar"):
-            if tabla in tablas or tabla in tablas_con_duenio:
-                conexion.execute(
-                    f"CREATE INDEX IF NOT EXISTS idx_{tabla}_usuario "
-                    f"ON {tabla} (usuario_id)"
-                )
+    if isinstance(valor, (date, time)):
+        return valor.isoformat()
+
+    return valor
+
+
+def fila_limpia(fila: dict) -> dict:
+    """
+    Limpia una fila de Postgres para poder devolverla como JSON.
+
+    Convierte los Decimal a float y las fechas a texto, y saca los
+    "_row_id_" que psycopg agrega por dentro.
+    """
+    return {
+        clave: a_json(valor)
+        for clave, valor in fila.items()
+        if not clave.startswith("_")
+    }
+
+
+def respaldo_de_usuario(usuario_id: str) -> dict:
+    """
+    Arma un diccionario con TODOS los datos de negocio de un usuario.
+
+    Se usa para la copia de seguridad en Google Drive. Antes se subía el
+    archivo SQLite entero; ahora que los datos viven en Postgres no hay
+    archivo que subir, así que se genera este resumen en JSON.
+
+    Solo incluye las filas de ese usuario: nadie más ve sus datos en la
+    copia, ni aunque la carpeta de Drive se compartiera por error.
+    """
+    with obtener_conexion() as conexion:
+        productos = conexion.execute(
+            "SELECT * FROM productos WHERE usuario_id = %s ORDER BY id",
+            (usuario_id,),
+        ).fetchall()
+
+        ventas = conexion.execute(
+            "SELECT * FROM ventas WHERE usuario_id = %s ORDER BY id",
+            (usuario_id,),
+        ).fetchall()
+
+        productos_vendidos = conexion.execute(
+            "SELECT * FROM productos_vendidos WHERE usuario_id = %s ORDER BY id",
+            (usuario_id,),
+        ).fetchall()
+
+        configuracion = conexion.execute(
+            "SELECT clave, valor FROM configuracion WHERE usuario_id = %s ORDER BY clave",
+            (usuario_id,),
+        ).fetchall()
+
+        precios_dolar = conexion.execute(
+            "SELECT * FROM precios_dolar WHERE usuario_id = %s ORDER BY id",
+            (usuario_id,),
+        ).fetchall()
 
         conexion.commit()
-    finally:
-        conexion.close()
+
+    # El token de Google NO se incluye en la copia: es una credencial
+    # y no hace falta para restaurar el inventario ni las ventas
+    ajustes = {
+        fila["clave"]: fila["valor"]
+        for fila in configuracion
+        if fila["clave"] != "token_drive"
+    }
+
+    return {
+        "generado_en": datetime.now().isoformat(timespec="seconds"),
+        "version": 1,
+        "usuario_id": usuario_id,
+        "productos": [fila_limpia(fila) for fila in productos],
+        "ventas": [fila_limpia(fila) for fila in ventas],
+        "productos_vendidos": [fila_limpia(fila) for fila in productos_vendidos],
+        "configuracion": ajustes,
+        "precios_dolar": [fila_limpia(fila) for fila in precios_dolar],
+    }
 
 
 # ------------------------------------------------------------

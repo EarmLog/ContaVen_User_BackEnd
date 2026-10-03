@@ -13,11 +13,9 @@ Endpoints:
   GET /api/analisis/resumen   -> todos los datos del reporte con filtros
 """
 
-import sqlite3
-
 from flask import Blueprint, jsonify, request
 
-from ..database import obtener_conexion, usuario_actual
+from ..database import a_json, fila_limpia, obtener_conexion, usuario_actual
 from .auth import cargar_usuario_autenticado
 
 rutas_analisis = Blueprint("analisis", __name__, url_prefix="/api/analisis")
@@ -46,29 +44,31 @@ def resumen_analitico():
     # Se construye el filtro de fechas y horas, que se usa en todas las consultas.
     # Lo primero siempre es el usuario_id, para que el reporte solo muestre
     # las ventas de quien tiene la sesión iniciada.
-    condiciones = ["v.usuario_id = ?"]
+    condiciones = ["v.usuario_id = %s"]
     valores = [usuario_actual()]
 
+    # fecha y hora son columnas date y time en Postgres. El %s::date y el
+    # %s::time le dicen que convierta el texto del filtro, para que la
+    # comparación se haga en la base y no en Python.
     if desde:
-        condiciones.append("v.fecha >= ?")
+        condiciones.append("v.fecha >= %s::date")
         valores.append(desde)
 
     if hasta:
-        condiciones.append("v.fecha <= ?")
+        condiciones.append("v.fecha <= %s::date")
         valores.append(hasta)
 
     if hora_inicio:
-        condiciones.append("v.hora >= ?")
+        condiciones.append("v.hora >= %s::time")
         valores.append(hora_inicio)
 
     if hora_fin:
-        condiciones.append("v.hora <= ?")
+        condiciones.append("v.hora <= %s::time")
         valores.append(hora_fin)
 
     texto_where = " AND ".join(condiciones)
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         # --- 1. Totales generales del periodo ---
         # La ganancia ya está guardada en cada venta como
         # (precio de venta - precio de compra) * unidades
@@ -76,12 +76,12 @@ def resumen_analitico():
             f"""
             SELECT
                 COUNT(*)                                   AS ventas,
-                IFNULL(SUM(v.total_ves), 0)                AS ventas_ves,
-                IFNULL(SUM(v.total_usd), 0)                AS ventas_usd,
-                IFNULL(SUM(v.costo_total_ves), 0)          AS costo_ves,
-                IFNULL(SUM(v.costo_total_usd), 0)          AS costo_usd,
-                IFNULL(SUM(v.ganancia_ves), 0)             AS ganancia_ves,
-                IFNULL(SUM(v.ganancia_usd), 0)             AS ganancia_usd
+                COALESCE(SUM(v.total_ves), 0)                AS ventas_ves,
+                COALESCE(SUM(v.total_usd), 0)                AS ventas_usd,
+                COALESCE(SUM(v.costo_total_ves), 0)          AS costo_ves,
+                COALESCE(SUM(v.costo_total_usd), 0)          AS costo_usd,
+                COALESCE(SUM(v.ganancia_ves), 0)             AS ganancia_ves,
+                COALESCE(SUM(v.ganancia_usd), 0)             AS ganancia_usd
             FROM ventas v
             WHERE {texto_where}
             """,
@@ -93,11 +93,11 @@ def resumen_analitico():
             f"""
             SELECT
                 pv.producto_nombre,
-                IFNULL(SUM(pv.unidades), 0)                AS unidades,
-                IFNULL(SUM(pv.subtotal_ves), 0)            AS ingresos_ves,
-                IFNULL(SUM(pv.subtotal_usd), 0)            AS ingresos_usd,
-                IFNULL(SUM(pv.ganancia_ves), 0)            AS ganancia_ves,
-                IFNULL(SUM(pv.ganancia_usd), 0)            AS ganancia_usd
+                COALESCE(SUM(pv.unidades), 0)                AS unidades,
+                COALESCE(SUM(pv.subtotal_ves), 0)            AS ingresos_ves,
+                COALESCE(SUM(pv.subtotal_usd), 0)            AS ingresos_usd,
+                COALESCE(SUM(pv.ganancia_ves), 0)            AS ganancia_ves,
+                COALESCE(SUM(pv.ganancia_usd), 0)            AS ganancia_usd
             FROM productos_vendidos pv
             JOIN ventas v ON v.id = pv.venta_id AND v.usuario_id = pv.usuario_id
             WHERE {texto_where}
@@ -114,10 +114,10 @@ def resumen_analitico():
             SELECT
                 v.fecha                AS etiqueta,
                 COUNT(*)               AS ventas,
-                IFNULL(SUM(v.total_ves), 0)  AS ingresos_ves,
-                IFNULL(SUM(v.total_usd), 0)  AS ingresos_usd,
-                IFNULL(SUM(v.ganancia_ves), 0) AS ganancia_ves,
-                IFNULL(SUM(v.ganancia_usd), 0) AS ganancia_usd
+                COALESCE(SUM(v.total_ves), 0)  AS ingresos_ves,
+                COALESCE(SUM(v.total_usd), 0)  AS ingresos_usd,
+                COALESCE(SUM(v.ganancia_ves), 0) AS ganancia_ves,
+                COALESCE(SUM(v.ganancia_usd), 0) AS ganancia_usd
             FROM ventas v
             WHERE {texto_where}
             GROUP BY v.fecha
@@ -131,12 +131,12 @@ def resumen_analitico():
         por_mes = conexion.execute(
             f"""
             SELECT
-                strftime('%Y-%m', v.fecha) AS etiqueta,
+                to_char(v.fecha, 'YYYY-MM') AS etiqueta,
                 COUNT(*)                    AS ventas,
-                IFNULL(SUM(v.total_ves), 0)       AS ingresos_ves,
-                IFNULL(SUM(v.total_usd), 0)       AS ingresos_usd,
-                IFNULL(SUM(v.ganancia_ves), 0)    AS ganancia_ves,
-                IFNULL(SUM(v.ganancia_usd), 0)    AS ganancia_usd
+                COALESCE(SUM(v.total_ves), 0)       AS ingresos_ves,
+                COALESCE(SUM(v.total_usd), 0)       AS ingresos_usd,
+                COALESCE(SUM(v.ganancia_ves), 0)    AS ganancia_ves,
+                COALESCE(SUM(v.ganancia_usd), 0)    AS ganancia_usd
             FROM ventas v
             WHERE {texto_where}
             GROUP BY etiqueta
@@ -150,10 +150,10 @@ def resumen_analitico():
         por_hora = conexion.execute(
             f"""
             SELECT
-                strftime('%H', v.hora) AS etiqueta,
+                to_char(v.hora, 'HH24') AS etiqueta,
                 COUNT(*)               AS ventas,
-                IFNULL(SUM(v.total_ves), 0)  AS ingresos_ves,
-                IFNULL(SUM(v.ganancia_ves), 0) AS ganancia_ves
+                COALESCE(SUM(v.total_ves), 0)  AS ingresos_ves,
+                COALESCE(SUM(v.ganancia_ves), 0) AS ganancia_ves
             FROM ventas v
             WHERE {texto_where}
             GROUP BY etiqueta
@@ -168,8 +168,8 @@ def resumen_analitico():
             SELECT
                 v.metodo_pago         AS etiqueta,
                 COUNT(*)              AS ventas,
-                IFNULL(SUM(v.total_ves), 0) AS ingresos_ves,
-                IFNULL(SUM(v.total_usd), 0) AS ingresos_usd
+                COALESCE(SUM(v.total_ves), 0) AS ingresos_ves,
+                COALESCE(SUM(v.total_usd), 0) AS ingresos_usd
             FROM ventas v
             WHERE {texto_where}
             GROUP BY v.metodo_pago
@@ -182,11 +182,13 @@ def resumen_analitico():
         stock_bajo = conexion.execute(
             """
             SELECT id, nombre, stock FROM productos
-            WHERE stock <= 5 AND usuario_id = ?
+            WHERE stock <= 5 AND usuario_id = %s
             ORDER BY stock ASC LIMIT 10
             """,
             (usuario_actual(),),
         ).fetchall()
+
+        conexion.commit()
 
         return jsonify({
             "filtros": {
@@ -201,11 +203,8 @@ def resumen_analitico():
             "por_mes": _redondear_filas(por_mes),
             "por_hora": _redondear_filas(por_hora),
             "por_metodo_pago": _redondear_filas(por_metodo),
-            "stock_bajo": [dict(fila) for fila in stock_bajo],
+            "stock_bajo": [fila_limpia(fila) for fila in stock_bajo],
         })
-
-    finally:
-        conexion.close()
 
 
 # ------------------------------------------------------------
@@ -227,23 +226,22 @@ def ventas_del_dia():
     # Solo las ventas del usuario que tiene la sesión iniciada
     duenio = usuario_actual()
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         # Productos vendidos hoy, agrupados por producto
         productos_hoy = conexion.execute(
             """
             SELECT
                 pv.producto_nombre,
-                IFNULL(SUM(pv.unidades), 0)         AS unidades,
+                COALESCE(SUM(pv.unidades), 0)         AS unidades,
                 pv.precio_unitario_ves,
                 pv.precio_unitario_usd,
-                IFNULL(SUM(pv.subtotal_ves), 0)     AS subtotal_ves,
-                IFNULL(SUM(pv.subtotal_usd), 0)     AS subtotal_usd,
-                IFNULL(SUM(pv.ganancia_ves), 0)     AS ganancia_ves,
-                IFNULL(SUM(pv.ganancia_usd), 0)     AS ganancia_usd
+                COALESCE(SUM(pv.subtotal_ves), 0)     AS subtotal_ves,
+                COALESCE(SUM(pv.subtotal_usd), 0)     AS subtotal_usd,
+                COALESCE(SUM(pv.ganancia_ves), 0)     AS ganancia_ves,
+                COALESCE(SUM(pv.ganancia_usd), 0)     AS ganancia_usd
             FROM productos_vendidos pv
             JOIN ventas v ON v.id = pv.venta_id AND v.usuario_id = pv.usuario_id
-            WHERE v.fecha = ? AND v.usuario_id = ?
+            WHERE v.fecha = %s::date AND v.usuario_id = %s
             GROUP BY pv.producto_nombre, pv.precio_unitario_ves, pv.precio_unitario_usd
             ORDER BY unidades DESC
             """,
@@ -255,23 +253,22 @@ def ventas_del_dia():
             """
             SELECT
                 COUNT(*)                       AS ventas,
-                IFNULL(SUM(total_ves), 0)      AS ingresos_ves,
-                IFNULL(SUM(total_usd), 0)      AS ingresos_usd,
-                IFNULL(SUM(ganancia_ves), 0)   AS ganancia_ves,
-                IFNULL(SUM(ganancia_usd), 0)   AS ganancia_usd
-            FROM ventas WHERE fecha = ? AND usuario_id = ?
+                COALESCE(SUM(total_ves), 0)      AS ingresos_ves,
+                COALESCE(SUM(total_usd), 0)      AS ingresos_usd,
+                COALESCE(SUM(ganancia_ves), 0)   AS ganancia_ves,
+                COALESCE(SUM(ganancia_usd), 0)   AS ganancia_usd
+            FROM ventas WHERE fecha = %s::date AND usuario_id = %s
             """,
             (hoy, duenio),
         ).fetchone()
+
+        conexion.commit()
 
         return jsonify({
             "fecha": hoy,
             "productos": _redondear_filas(productos_hoy),
             "totales": _redondear_filas(totales_hoy)[0],
         })
-
-    finally:
-        conexion.close()
 
 
 # ------------------------------------------------------------
@@ -289,29 +286,32 @@ def _fecha_de_hoy() -> str:
 # ============================================================
 def _redondear_filas(filas) -> list:
     """
-    Convierte las filas de SQLite en diccionarios y redondea a 2 decimales
+    Convierte las filas de Postgres en diccionarios y redondea a 2 decimales
     todos los números, para que las sumas no muestren muchos decimales
     (por ejemplo 13.879999999999999 en vez de 13.88).
-    Acepta una sola fila o una lista de filas.
+
+    Postgres devuelve los "numeric" como Decimal y las fechas como date/time,
+    así que también se pasan por a_json() para que jsonify pueda escribirlos.
+
+    Acepta una sola fila (dict) o una lista de filas.
     """
     # Si es una sola fila, se devuelve una lista con esa fila
-    if isinstance(filas, sqlite3.Row):
+    if isinstance(filas, dict):
         filas = [filas]
 
     resultado = []
 
     for fila in filas:
-        fila_limpia = {}
+        valores = {}
 
-        for clave in fila.keys():
-            valor = fila[clave]
-
-            # Los flotantes se redondean, los demás valores se dejan igual
+        for clave, valor in fila.items():
+            # Los flotantes se redondean a 2 decimales; los Decimal (numeric)
+            # y las fechas los resuelve a_json()
             if isinstance(valor, float):
-                fila_limpia[clave] = round(valor, 2)
+                valores[clave] = round(valor, 2)
             else:
-                fila_limpia[clave] = valor
+                valores[clave] = a_json(valor)
 
-        resultado.append(fila_limpia)
+        resultado.append(valores)
 
     return resultado

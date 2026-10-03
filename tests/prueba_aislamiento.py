@@ -12,11 +12,11 @@ Para usarlo, con el backend corriendo en el puerto 5001:
     python prueba_aislamiento.py
 """
 
+import os
 import sys
 import time
 
 import requests
-import sys
 from pathlib import Path
 
 # Se añade la raíz del backend al path para poder importar "app"
@@ -24,9 +24,25 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
-API = "http://127.0.0.1:5001"
-SUPABASE = "https://owhfypcyinmoaeuvqeqm.supabase.co"
-LLAVE = "sb_publishable_q_oh0Qpjlu4g1J1vQk2_iA_s-2hOQUf"
+# El backend tiene que estar arrancado y la base de datos configurada.
+# Se pueden cambiar con estas variables si el entorno es distinto:
+#   API_URL, SUPABASE_URL_PRUEBA, SUPABASE_LLAVE_PRUEBA
+API = os.getenv("API_URL", "http://127.0.0.1:5001")
+
+# La publishable key no es un secreto (va también en el bundle del
+# navegador), pero no tiene por qué quedar escrita en el repo: se lee
+# del .env igual que el backend.
+_dotenv = RAIZ / ".env"
+if _dotenv.exists():
+    for _linea in _dotenv.read_text().splitlines():
+        if "=" not in _linea or _linea.strip().startswith("#"):
+            continue
+        _clave, _, _valor = _linea.partition("=")
+        os.environ.setdefault(_clave.strip(), _valor.strip().strip("'\""))
+
+SUPABASE = os.getenv("SUPABASE_URL_PRUEBA") or os.getenv("SUPABASE_URL", "")
+LLAVE = (os.getenv("SUPABASE_LLAVE_PRUEBA")
+         or os.getenv("SUPABASE_PUBLISHABLE_KEY", ""))
 
 marca = int(time.time())
 CORREO_A = f"aisla_a_{marca}@contaven.com"

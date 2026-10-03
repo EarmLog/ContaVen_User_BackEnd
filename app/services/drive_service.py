@@ -278,6 +278,26 @@ def subir_archivo(token: str, carpeta_id: str, archivo: Path, nombre_destino: st
     except OSError:
         raise ErrorDrive("No se pudo leer el archivo de la base de datos.")
 
+    return _subir_contenido(token, carpeta_id, contenido, nombre_destino)
+
+
+def subir_contenido(token: str, carpeta_id: str, contenido: bytes, nombre_destino: str) -> str:
+    """
+    Sube contenido en memoria a la carpeta indicada.
+
+    Se usa para el respaldo en JSON: como los datos ya viven en Postgres,
+    no hay un archivo en disco que mandar, así que se arma el JSON en
+    memoria y se sube directo.
+    """
+    return _subir_contenido(token, carpeta_id, contenido, nombre_destino)
+
+
+def _subir_contenido(token: str, carpeta_id: str, contenido: bytes, nombre_destino: str) -> str:
+    """Sube los bytes a Drive con la subida multipart y devuelve el id."""
+    metadatos = (
+        f'{{"name": "{nombre_destino}", "parents": ["{carpeta_id}"]}}'
+    )
+
     respuesta = _peticion(
         "POST",
         URL_SUBIDA,

@@ -11,12 +11,11 @@ Endpoints:
   GET  /api/dolar/historico        -> historial de tasas guardadas
 """
 
-import sqlite3
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
-from ..database import obtener_conexion, usuario_actual
+from ..database import fila_limpia, obtener_conexion, usuario_actual
 from ..config import config
 from .auth import cargar_usuario_autenticado
 from ..services.tipos_cambio import convertir, consultar_tasa_dolar
@@ -39,35 +38,34 @@ AJUSTES_POR_DEFECTO = {
 # ------------------------------------------------------------
 def _guardar_tasa(precio_ves: float, origen: str) -> None:
     """Guarda una tasa nueva en el historial del usuario."""
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         conexion.execute(
-            "INSERT INTO precios_dolar (usuario_id, precio_ves, origen) VALUES (?, ?, ?)",
+            "INSERT INTO precios_dolar (usuario_id, precio_ves, origen) VALUES (%s, %s, %s)",
             (usuario_actual(), precio_ves, origen),
         )
         conexion.commit()
-    finally:
-        conexion.close()
 
 
 def _ultima_tasa() -> dict | None:
     """Trae la última tasa guardada del usuario, con su fecha."""
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         fila = conexion.execute(
-            "SELECT precio_ves, origen, actualizado_en FROM precios_dolar WHERE usuario_id = ? ORDER BY id DESC LIMIT 1",
+            "SELECT precio_ves, origen, actualizado_en FROM precios_dolar WHERE usuario_id = %s ORDER BY id DESC LIMIT 1",
             (usuario_actual(),),
         ).fetchone()
-    finally:
-        conexion.close()
 
-    return dict(fila) if fila else None
+        conexion.commit()
+
+    return fila_limpia(fila) if fila else None
 
 
-def _tasa_esta_vieja(fecha_guardada: str | None) -> bool:
+def _tasa_esta_vieja(fecha_guardada) -> bool:
     """
     Dice si la tasa guardada ya tiene la edad suficiente como para
     volver a consultarla por internet.
+
+    Postgres devuelve "actualizado_en" como datetime, no como texto, así que
+    se acepta cualquiera de los dos por si acaso.
     """
     if not fecha_guardada:
         return True
@@ -76,9 +74,12 @@ def _tasa_esta_vieja(fecha_guardada: str | None) -> bool:
     if minutos <= 0:
         return False
 
-    # La base guarda fechas como "AAAA-MM-DD HH:MM:SS"
     try:
-        guardada = datetime.strptime(fecha_guardada, "%Y-%m-%d %H:%M:%S")
+        if isinstance(fecha_guardada, datetime):
+            guardada = fecha_guardada.replace(tzinfo=None)
+        else:
+            # Por si viniera como texto "AAAA-MM-DD HH:MM:SS"
+            guardada = datetime.strptime(str(fecha_guardada), "%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         # Si no se entiende la fecha, mejor refrescar antes que mostrar algo viejo
         return True
@@ -97,14 +98,13 @@ def _refrescar_tasa_si_hace_falta() -> None:
     Si la API falla no se molesta al usuario: se queda con la tasa anterior,
     que siempre es mejor que mostrar un error.
     """
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         fila = conexion.execute(
-            "SELECT valor FROM configuracion WHERE usuario_id = ? AND clave = 'actualizar_precios_auto'",
+            "SELECT valor FROM configuracion WHERE usuario_id = %s AND clave = 'actualizar_precios_auto'",
             (usuario_actual(),),
         ).fetchone()
-    finally:
-        conexion.close()
+
+        conexion.commit()
 
     activado = fila["valor"] if fila else AJUSTES_POR_DEFECTO["actualizar_precios_auto"]
 
@@ -132,21 +132,19 @@ def leer_configuracion():
     if error:
         return error, codigo
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         filas = conexion.execute(
-            "SELECT clave, valor FROM configuracion WHERE usuario_id = ?",
+            "SELECT clave, valor FROM configuracion WHERE usuario_id = %s",
             (usuario_actual(),),
         ).fetchall()
 
-        # Se empieza con los valores por defecto y se pisan con lo guardado
-        ajustes = dict(AJUSTES_POR_DEFECTO)
-        ajustes.update({fila["clave"]: fila["valor"] for fila in filas})
+        conexion.commit()
 
-        return jsonify({"configuracion": ajustes})
+    # Se empieza con los valores por defecto y se pisan con lo guardado
+    ajustes = dict(AJUSTES_POR_DEFECTO)
+    ajustes.update({fila["clave"]: fila["valor"] for fila in filas})
 
-    finally:
-        conexion.close()
+    return jsonify({"configuracion": ajustes})
 
 
 # ------------------------------------------------------------
@@ -178,26 +176,22 @@ def guardar_configuracion():
         "nombre_negocio": (datos.get("nombre_negocio") or "Mi negocio").strip() or "Mi negocio",
     }
 
-    conexion = obtener_conexion()
-    try:
-        # Se guardan o actualizan uno por uno los ajustes
+    with obtener_conexion() as conexion:
+        # Se guardan o actualizan uno por uno los ajustes.
+        # "actualizado_en" lo pone un trigger de la base.
         for clave, valor in valores.items():
             conexion.execute(
                 """
                 INSERT INTO configuracion (usuario_id, clave, valor)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
                 ON CONFLICT(usuario_id, clave) DO UPDATE SET
-                    valor = excluded.valor,
-                    actualizado_en = datetime('now', 'localtime')
+                    valor = excluded.valor
                 """,
                 (usuario_actual(), clave, valor),
             )
         conexion.commit()
 
-        return jsonify({"mensaje": "Configuración guardada.", "configuracion": valores})
-
-    finally:
-        conexion.close()
+    return jsonify({"mensaje": "Configuración guardada.", "configuracion": valores})
 
 
 # ------------------------------------------------------------
@@ -230,7 +224,7 @@ def leer_dolar():
         })
 
     return jsonify({
-        "precio_ves": fila["precio_ves"],
+        "precio_ves": float(fila["precio_ves"]),
         "origen": fila["origen"],
         "actualizado_en": fila["actualizado_en"],
     })
@@ -366,14 +360,12 @@ def historico_dolar():
     if error:
         return error, codigo
 
-    conexion = obtener_conexion()
-    try:
+    with obtener_conexion() as conexion:
         filas = conexion.execute(
-            "SELECT precio_ves, origen, actualizado_en FROM precios_dolar WHERE usuario_id = ? ORDER BY id DESC LIMIT 30",
+            "SELECT precio_ves, origen, actualizado_en FROM precios_dolar WHERE usuario_id = %s ORDER BY id DESC LIMIT 30",
             (usuario_actual(),),
         ).fetchall()
 
-        return jsonify({"historial": [dict(fila) for fila in filas]})
+        conexion.commit()
 
-    finally:
-        conexion.close()
+    return jsonify({"historial": [fila_limpia(fila) for fila in filas]})
