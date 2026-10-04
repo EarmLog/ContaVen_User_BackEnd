@@ -14,6 +14,8 @@ database.db-shm
 
 # Variables de entorno con las llaves de Supabase
 .env
+.env.local
+.env.*.local
 
 # Sistema operativo y editores
 .DS_Store
@@ -24,3 +26,6 @@ Thumbs.db
 # Copias de la base de datos (incluidas las que genera el respaldo)
 copias/
 *.backup
+
+# Archivos que genera "vercel link"
+.vercel
