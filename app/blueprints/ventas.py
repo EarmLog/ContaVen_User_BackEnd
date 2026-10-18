@@ -18,7 +18,7 @@ from .productos import obtener_tasa_dolar
 rutas_ventas = Blueprint("ventas", __name__, url_prefix="/api/ventas")
 
 # Métodos de pago permitidos en el POS
-METODOS_PAGO = ("efectivo", "punto", "pagomovil", "app")
+METODOS_PAGO = ("efectivo", "punto", "pagomovil", "biopago")
 
 
 # ------------------------------------------------------------
@@ -50,7 +50,7 @@ def registrar_venta():
 
     if metodo_pago not in METODOS_PAGO:
         return jsonify(
-            {"error": "El método de pago debe ser: efectivo, punto, pagomovil o app."}
+            {"error": "El método de pago debe ser: efectivo, punto, pagomovil o biopago."}
         ), 400
 
     # La venta se guarda con el id del dueño, tomado del token de sesión
@@ -124,6 +124,27 @@ def registrar_venta():
                     precio_unitario_ves = float(producto["precio_ves"])
                     precio_unitario_usd = float(producto["precio_usd"])
 
+                # Se calcula el descuento por cantidad.
+                # Aplica el descuento por unidad si se lleva la cantidad
+                # mínima, y el descuento por bulto si se lleva el bulto
+                # completo. Si los dos aplican, se usa el mayor (no se suman).
+                unidades_bulto = int(producto["unidades_por_bulto"] or 1)
+                descuento_unidad = float(producto["descuento_unidad_porcentaje"] or 0)
+                descuento_unidad_desde = int(producto["descuento_unidad_desde"] or 1)
+                descuento_bulto = float(producto["descuento_bulto_porcentaje"] or 0)
+
+                descuento_porcentaje = 0.0
+                if descuento_unidad > 0 and unidades >= descuento_unidad_desde:
+                    descuento_porcentaje = max(descuento_porcentaje, descuento_unidad)
+                if descuento_bulto > 0 and unidades_bulto > 1 and unidades >= unidades_bulto:
+                    descuento_porcentaje = max(descuento_porcentaje, descuento_bulto)
+
+                # El descuento se aplica sobre el precio que corresponda
+                # (al detal o al mayor)
+                factor_descuento = 1 - descuento_porcentaje / 100
+                precio_unitario_ves = round(precio_unitario_ves * factor_descuento, 2)
+                precio_unitario_usd = round(precio_unitario_usd * factor_descuento, 2)
+
                 costo_unitario_ves = float(producto["precio_compra_ves"])
                 costo_unitario_usd = float(producto["precio_compra_usd"])
 
@@ -144,16 +165,16 @@ def registrar_venta():
                         precio_unitario_ves, precio_unitario_usd,
                         costo_unitario_ves, costo_unitario_usd,
                         subtotal_ves, subtotal_usd, ganancia_ves, ganancia_usd,
-                        es_mayor, unidades_por_bulto
+                        es_mayor, unidades_por_bulto, descuento_porcentaje
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         duenio, venta_id, producto_id, producto["nombre"], unidades,
                         precio_unitario_ves, precio_unitario_usd,
                         costo_unitario_ves, costo_unitario_usd,
                         subtotal_ves, subtotal_usd, ganancia_ves, ganancia_usd,
-                        usa_mayor, int(producto["unidades_por_bulto"] or 1),
+                        usa_mayor, unidades_bulto, descuento_porcentaje,
                     ),
                 )
 

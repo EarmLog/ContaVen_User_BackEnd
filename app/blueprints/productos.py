@@ -77,6 +77,11 @@ def crear_producto():
     precio_mayor_ves = a_numero(datos.get("precio_mayor_ves"))
     precio_mayor_usd = a_numero(datos.get("precio_mayor_usd"))
 
+    # --- Campos de descuento (opcionales) ---
+    descuento_unidad_porcentaje = round(a_numero(datos.get("descuento_unidad_porcentaje")), 2)
+    descuento_unidad_desde = entero_opcion(datos.get("descuento_unidad_desde")) or 1
+    descuento_bulto_porcentaje = round(a_numero(datos.get("descuento_bulto_porcentaje")), 2)
+
     # --- Validaciones ---
     if not nombre:
         return jsonify({"error": "El nombre del producto es obligatorio."}), 400
@@ -99,6 +104,17 @@ def crear_producto():
 
     if cantidad_mayor < 1:
         return jsonify({"error": "La cantidad mínima al mayor debe ser al menos 1."}), 400
+
+    if not 0 <= descuento_unidad_porcentaje <= 100:
+        return jsonify({"error": "El descuento por unidad debe estar entre 0 y 100."}), 400
+
+    if descuento_unidad_desde < 1:
+        return jsonify(
+            {"error": "La cantidad mínima para el descuento por unidad debe ser al menos 1."}
+        ), 400
+
+    if not 0 <= descuento_bulto_porcentaje <= 100:
+        return jsonify({"error": "El descuento por bulto debe estar entre 0 y 100."}), 400
 
     # Si solo viene un precio, el otro se calcula con la tasa del dólar
     precio_ves, precio_usd = _completar_precios(precio_ves, precio_usd)
@@ -124,9 +140,10 @@ def crear_producto():
                 usuario_id, nombre, stock, tipo, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
-                unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd
+                unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd,
+                descuento_unidad_porcentaje, descuento_unidad_desde, descuento_bulto_porcentaje
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -135,6 +152,7 @@ def crear_producto():
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
                 unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd,
+                descuento_unidad_porcentaje, descuento_unidad_desde, descuento_bulto_porcentaje,
             ),
         ).fetchone()
 
@@ -173,6 +191,11 @@ def editar_producto(id_producto: int):
     precio_mayor_ves = a_numero(datos.get("precio_mayor_ves"))
     precio_mayor_usd = a_numero(datos.get("precio_mayor_usd"))
 
+    # --- Campos de descuento (opcionales) ---
+    descuento_unidad_porcentaje = round(a_numero(datos.get("descuento_unidad_porcentaje")), 2)
+    descuento_unidad_desde = entero_opcion(datos.get("descuento_unidad_desde")) or 1
+    descuento_bulto_porcentaje = round(a_numero(datos.get("descuento_bulto_porcentaje")), 2)
+
     # --- Validaciones ---
     if not nombre:
         return jsonify({"error": "El nombre del producto es obligatorio."}), 400
@@ -192,6 +215,15 @@ def editar_producto(id_producto: int):
 
     if cantidad_mayor < 1:
         return jsonify({"error": "La cantidad mínima al mayor debe ser al menos 1."}), 400
+
+    if not 0 <= descuento_unidad_porcentaje <= 100:
+        return jsonify({"error": "El porcentaje de descuento por unidad debe estar entre 0 y 100."}), 400
+
+    if descuento_unidad_desde < 1:
+        return jsonify({"error": "La cantidad mínima para el descuento por unidad debe ser al menos 1."}), 400
+
+    if not 0 <= descuento_bulto_porcentaje <= 100:
+        return jsonify({"error": "El porcentaje de descuento por bulto debe estar entre 0 y 100."}), 400
 
     precio_ves, precio_usd = _completar_precios(precio_ves, precio_usd)
     precio_compra_ves, precio_compra_usd = _completar_precios(
@@ -214,7 +246,9 @@ def editar_producto(id_producto: int):
                 precio_ves = %s, precio_usd = %s,
                 precio_compra_ves = %s, precio_compra_usd = %s,
                 unidades_por_bulto = %s, cantidad_mayor = %s,
-                precio_mayor_ves = %s, precio_mayor_usd = %s
+                precio_mayor_ves = %s, precio_mayor_usd = %s,
+                descuento_unidad_porcentaje = %s, descuento_unidad_desde = %s,
+                descuento_bulto_porcentaje = %s
             WHERE id = %s AND usuario_id = %s
             RETURNING *
             """,
@@ -224,6 +258,8 @@ def editar_producto(id_producto: int):
                 precio_compra_ves, precio_compra_usd,
                 unidades_por_bulto, cantidad_mayor,
                 precio_mayor_ves, precio_mayor_usd,
+                descuento_unidad_porcentaje, descuento_unidad_desde,
+                descuento_bulto_porcentaje,
                 id_producto, duenio,
             ),
         ).fetchone()
