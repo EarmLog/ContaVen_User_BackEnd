@@ -12,7 +12,7 @@ from flask import Blueprint, jsonify, request
 
 from ..config import config
 from ..database import fila_limpia, obtener_conexion, usuario_actual
-from ..utils.security import a_numero, a_texto
+from ..utils.security import a_numero, a_texto, entero_opcion
 from .auth import cargar_usuario_autenticado
 
 rutas_productos = Blueprint("productos", __name__, url_prefix="/api/productos")
@@ -71,6 +71,12 @@ def crear_producto():
     precio_compra_ves = a_numero(datos.get("precio_compra_ves"))
     precio_compra_usd = a_numero(datos.get("precio_compra_usd"))
 
+    # --- Campos de bultos y precio al mayor (opcionales) ---
+    unidades_por_bulto = entero_opcion(datos.get("unidades_por_bulto")) or 1
+    cantidad_mayor = entero_opcion(datos.get("cantidad_mayor")) or 1
+    precio_mayor_ves = a_numero(datos.get("precio_mayor_ves"))
+    precio_mayor_usd = a_numero(datos.get("precio_mayor_usd"))
+
     # --- Validaciones ---
     if not nombre:
         return jsonify({"error": "El nombre del producto es obligatorio."}), 400
@@ -88,10 +94,22 @@ def crear_producto():
     if precio_ves <= 0 and precio_usd <= 0:
         return jsonify({"error": "Debes colocar el precio de venta en VES o en USD."}), 400
 
+    if unidades_por_bulto < 1:
+        return jsonify({"error": "Las unidades por bulto deben ser al menos 1."}), 400
+
+    if cantidad_mayor < 1:
+        return jsonify({"error": "La cantidad mínima al mayor debe ser al menos 1."}), 400
+
     # Si solo viene un precio, el otro se calcula con la tasa del dólar
     precio_ves, precio_usd = _completar_precios(precio_ves, precio_usd)
     precio_compra_ves, precio_compra_usd = _completar_precios(
         precio_compra_ves, precio_compra_usd
+    )
+
+    # El precio al mayor también se completa si se colocó al menos uno.
+    # Si no se colocó ninguno, se queda en cero (no se vende al mayor).
+    precio_mayor_ves, precio_mayor_usd = _completar_precios_mayor(
+        precio_mayor_ves, precio_mayor_usd
     )
 
     # --- Se inserta el producto en Postgres ---
@@ -105,9 +123,10 @@ def crear_producto():
             INSERT INTO productos (
                 usuario_id, nombre, stock, tipo, descripcion, sku,
                 precio_ves, precio_usd,
-                precio_compra_ves, precio_compra_usd
+                precio_compra_ves, precio_compra_usd,
+                unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -115,6 +134,7 @@ def crear_producto():
                 nombre, stock_numero, tipo, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
+                unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd,
             ),
         ).fetchone()
 
@@ -147,6 +167,12 @@ def editar_producto(id_producto: int):
     precio_compra_ves = a_numero(datos.get("precio_compra_ves"))
     precio_compra_usd = a_numero(datos.get("precio_compra_usd"))
 
+    # --- Campos de bultos y precio al mayor (opcionales) ---
+    unidades_por_bulto = entero_opcion(datos.get("unidades_por_bulto")) or 1
+    cantidad_mayor = entero_opcion(datos.get("cantidad_mayor")) or 1
+    precio_mayor_ves = a_numero(datos.get("precio_mayor_ves"))
+    precio_mayor_usd = a_numero(datos.get("precio_mayor_usd"))
+
     # --- Validaciones ---
     if not nombre:
         return jsonify({"error": "El nombre del producto es obligatorio."}), 400
@@ -161,9 +187,18 @@ def editar_producto(id_producto: int):
     if precio_ves <= 0 and precio_usd <= 0:
         return jsonify({"error": "Debes colocar el precio de venta en VES o en USD."}), 400
 
+    if unidades_por_bulto < 1:
+        return jsonify({"error": "Las unidades por bulto deben ser al menos 1."}), 400
+
+    if cantidad_mayor < 1:
+        return jsonify({"error": "La cantidad mínima al mayor debe ser al menos 1."}), 400
+
     precio_ves, precio_usd = _completar_precios(precio_ves, precio_usd)
     precio_compra_ves, precio_compra_usd = _completar_precios(
         precio_compra_ves, precio_compra_usd
+    )
+    precio_mayor_ves, precio_mayor_usd = _completar_precios_mayor(
+        precio_mayor_ves, precio_mayor_usd
     )
 
     # --- Se actualiza el producto en Postgres ---
@@ -177,7 +212,9 @@ def editar_producto(id_producto: int):
             UPDATE productos SET
                 nombre = %s, stock = %s, tipo = %s, descripcion = %s, sku = %s,
                 precio_ves = %s, precio_usd = %s,
-                precio_compra_ves = %s, precio_compra_usd = %s
+                precio_compra_ves = %s, precio_compra_usd = %s,
+                unidades_por_bulto = %s, cantidad_mayor = %s,
+                precio_mayor_ves = %s, precio_mayor_usd = %s
             WHERE id = %s AND usuario_id = %s
             RETURNING *
             """,
@@ -185,6 +222,8 @@ def editar_producto(id_producto: int):
                 nombre, stock_numero, tipo, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
+                unidades_por_bulto, cantidad_mayor,
+                precio_mayor_ves, precio_mayor_usd,
                 id_producto, duenio,
             ),
         ).fetchone()
@@ -260,6 +299,19 @@ def _completar_precios(ves: float, usd: float) -> tuple[float, float]:
 
     # Si no vino ninguno se devuelven en cero
     return 0.0, 0.0
+
+
+def _completar_precios_mayor(ves: float, usd: float) -> tuple[float, float]:
+    """
+    Igual que _completar_precios, pero respetando que el precio al mayor
+    es OPCIONAL: si no se colocó ninguno de los dos, se deja en cero para
+    que quede claro que ese producto no se vende al mayor.
+    """
+    # Si no se colocó ningún precio al mayor, no se calcula nada
+    if ves <= 0 and usd <= 0:
+        return 0.0, 0.0
+
+    return _completar_precios(ves, usd)
 
 
 def obtener_tasa_dolar() -> float:

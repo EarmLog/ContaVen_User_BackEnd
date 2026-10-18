@@ -16,6 +16,8 @@ Para arrancarlo:
     python run.py
 """
 
+import os
+
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -27,6 +29,11 @@ from .blueprints.productos import rutas_productos
 from .blueprints.ventas import rutas_ventas
 from .config import config
 from .database import comprobar_conexion
+
+# Vercel inyecta estas variables en sus funciones. Se usan para distinguir
+# "estoy en un servidor normal" de "estoy en una función de Vercel", donde
+# la app se reconstruye en cada petición y no debe morir al importar.
+VERCEL = bool(os.getenv("VERCEL"))
 
 
 def crear_aplicacion() -> Flask:
@@ -47,8 +54,24 @@ def crear_aplicacion() -> Flask:
     # Ruta rápida para comprobar que el servidor está vivo
     @app.get("/api/salud")
     def salud():
-        """Comprueba que el backend responde bien."""
-        return jsonify({"mensaje": "ContaVen User API está funcionando."})
+        """
+        Comprueba que el backend responde bien.
+
+        Incluye el estado de la base de datos porque en Vercel las funciones
+        son efímeras: la app puede seguir viva aunque Postgres no responda
+        en ese instante. Con solo el mensaje fijo no se distinguía un
+        despliegue roto de una base temporalmente inalcanzable.
+        """
+        cuerpo = {"mensaje": "ContaVen User API está funcionando.", "base_de_datos": "sin_revisar"}
+
+        try:
+            comprobar_conexion()
+            cuerpo["base_de_datos"] = "conectada"
+        except Exception as error:  # noqa: BLE001 - aquí solo se informa
+            cuerpo["base_de_datos"] = "sin_conexion"
+            cuerpo["detalle_base_de_datos"] = str(error).splitlines()[0][:300]
+
+        return jsonify(cuerpo), (200 if cuerpo["base_de_datos"] == "conectada" else 503)
 
     return app
 
@@ -64,18 +87,31 @@ def crear_app() -> Flask:
     Ya no hace falta crear tablas ni migrar el esquema: en Postgres el
     esquema se aplica con un archivo de migración versionado, y la base
     solo se abre para confirmar que responde.
+
+    OJO con la diferencia entre local y Vercel:
+
+    - En local (run.py) la app es un proceso que se queda vivo, así que si
+      la base no responde se detiene todo con SystemExit: es más fácil de
+      arreglar que una app que arranca a medias.
+    - En Vercel la app se construye en cada petición dentro de una función
+      fugaz. Si aquí se hiciera SystemExit, un hipo de red de Postgres
+      devolvería FUNCTION_INVOCATION_FAILED (error 500) y se vería igual
+      que un despliegue roto. Por eso en producción solo se avisa y se
+      sigue: cada endpoint se encarga del error de la base por su cuenta,
+      y /api/salud informa si la conexión está bien.
     """
     try:
         comprobar_conexion()
-    except RuntimeError as error_conexion:
-        # Sin conexión no tiene sentido arrancar: se avisa con el motivo
-        # exacto y se detiene, en vez de dejar que falle cada consulta
-        print(f"\n{'=' * 60}")
-        print("  No se pudo conectar con la base de datos")
-        print(f"{'=' * 60}\n")
-        print(error_conexion)
-        print()
-        raise SystemExit(1) from error_conexion
+    except Exception as error_conexion:  # noqa: BLE001 - se avisa de cualquier fallo
+        aviso = f"\n{'=' * 60}\n  No se pudo conectar con la base de datos\n{'=' * 60}\n{error_conexion}\n"
+
+        if VERCEL:
+            # En Vercel se registra el aviso y la app arranca igualmente
+            print(aviso, flush=True)
+        else:
+            # En local se detiene el proceso para no fallar en cada consulta
+            print(aviso)
+            raise SystemExit(1) from error_conexion
 
     return crear_aplicacion()
 

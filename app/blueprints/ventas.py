@@ -104,9 +104,26 @@ def registrar_venta():
                         f"Disponible: {producto['stock']}."
                     )
 
-                # Se calculan los valores de la línea de venta
-                precio_unitario_ves = float(producto["precio_ves"])
-                precio_unitario_usd = float(producto["precio_usd"])
+                # Se calculan los valores de la línea de venta.
+                # El precio al mayor se aplica solo si el cliente lo pidió
+                # (es_mayor), el producto lo ofrece (precio_mayor > 0) y se
+                # lleva al menos la cantidad mínima (cantidad_mayor).
+                ofrece_mayor = (
+                    float(producto["precio_mayor_ves"] or 0) > 0
+                    or float(producto["precio_mayor_usd"] or 0) > 0
+                )
+                cantidad_mayor = int(producto["cantidad_mayor"] or 1)
+                usa_mayor = (
+                    bool(item.get("es_mayor")) and ofrece_mayor and unidades >= cantidad_mayor
+                )
+
+                if usa_mayor:
+                    precio_unitario_ves = float(producto["precio_mayor_ves"])
+                    precio_unitario_usd = float(producto["precio_mayor_usd"])
+                else:
+                    precio_unitario_ves = float(producto["precio_ves"])
+                    precio_unitario_usd = float(producto["precio_usd"])
+
                 costo_unitario_ves = float(producto["precio_compra_ves"])
                 costo_unitario_usd = float(producto["precio_compra_usd"])
 
@@ -126,15 +143,17 @@ def registrar_venta():
                         usuario_id, venta_id, producto_id, producto_nombre, unidades,
                         precio_unitario_ves, precio_unitario_usd,
                         costo_unitario_ves, costo_unitario_usd,
-                        subtotal_ves, subtotal_usd, ganancia_ves, ganancia_usd
+                        subtotal_ves, subtotal_usd, ganancia_ves, ganancia_usd,
+                        es_mayor, unidades_por_bulto
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         duenio, venta_id, producto_id, producto["nombre"], unidades,
                         precio_unitario_ves, precio_unitario_usd,
                         costo_unitario_ves, costo_unitario_usd,
                         subtotal_ves, subtotal_usd, ganancia_ves, ganancia_usd,
+                        usa_mayor, int(producto["unidades_por_bulto"] or 1),
                     ),
                 )
 
