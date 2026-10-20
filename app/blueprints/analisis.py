@@ -272,6 +272,84 @@ def ventas_del_dia():
 
 
 # ------------------------------------------------------------
+# GET /api/analisis/productos-sin-vender
+# Lista productos que NO se han vendido en el periodo
+# ------------------------------------------------------------
+@rutas_analisis.get("/productos-sin-vender")
+def productos_sin_vender():
+    """
+    Devuelve los productos que no han tenido ninguna venta
+    en el periodo especificado (o desde el inicio).
+    Permite aplicar descuento a estos productos desde el frontend.
+    """
+    error, codigo = cargar_usuario_autenticado()
+    if error:
+        return error, codigo
+
+    desde = request.args.get("desde")
+    hasta = request.args.get("hasta")
+
+    # Filtro de fechas para la subconsulta que decide qué productos SÍ se
+    # vendieron. Los que queden fuera de esa lista son los "sin vender".
+    filtro_fechas = ""
+    valores_sub = [usuario_actual()]
+
+    if desde:
+        filtro_fechas += " AND v2.fecha >= %s::date"
+        valores_sub.append(desde)
+
+    if hasta:
+        filtro_fechas += " AND v2.fecha <= %s::date"
+        valores_sub.append(hasta)
+
+    # El orden de los parámetros es: el del WHERE principal, luego los de
+    # la subconsulta (usuario + fechas).
+    parametros = [usuario_actual()] + valores_sub
+
+    with obtener_conexion() as conexion:
+        # Productos que NO aparecen en productos_vendidos para el periodo
+        filas = conexion.execute(
+            f"""
+            SELECT
+                p.id,
+                p.nombre,
+                p.tipo,
+                p.sku,
+                p.stock,
+                p.precio_ves,
+                p.precio_usd,
+                p.precio_compra_ves,
+                p.precio_compra_usd,
+                p.unidades_por_bulto,
+                p.cantidad_mayor,
+                p.precio_mayor_ves,
+                p.precio_mayor_usd,
+                p.descuento_unidad_porcentaje,
+                p.descuento_unidad_desde,
+                p.descuento_bulto_porcentaje
+            FROM productos p
+            WHERE p.usuario_id = %s
+            AND p.id NOT IN (
+                SELECT DISTINCT pv2.producto_id
+                FROM productos_vendidos pv2
+                JOIN ventas v2 ON v2.id = pv2.venta_id
+                WHERE v2.usuario_id = %s
+                {filtro_fechas}
+            )
+            ORDER BY p.nombre ASC
+            """,
+            parametros,
+        ).fetchall()
+
+        conexion.commit()
+
+        return jsonify({
+            "productos": _redondear_filas(filas),
+            "total": len(filas),
+        })
+
+
+# ------------------------------------------------------------
 # Utilidad: fecha de hoy en formato AAAA-MM-DD
 # ------------------------------------------------------------
 def _fecha_de_hoy() -> str:

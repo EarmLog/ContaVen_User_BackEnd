@@ -47,6 +47,57 @@ def listar_productos():
 
 
 # ------------------------------------------------------------
+# Generador de SKU automático
+# ------------------------------------------------------------
+def _generar_sku(conexion, nombre, tipo="", duenio=None):
+    """
+    Genera un SKU automático para un producto nuevo.
+
+    El SKU se arma con:
+      - las primeras 3 letras del nombre (sin espacios ni símbolos),
+      - las primeras 3 letras del tipo, si el producto tiene tipo,
+      - y un número consecutivo que crece con cada producto de la misma base.
+
+    Ejemplo: "Arroz" del tipo "Alimento" -> "ARR-ALI-001".
+    Si ya existe ARR-ALI-001, el nuevo será ARR-ALI-002.
+
+    El número se busca entre los SKU que ya tiene ese mismo usuario, así que
+    cada negocio lleva su propia numeración y nunca se repite dentro del suyo.
+    """
+    # Se toman letras y números del nombre (se descartan espacios y símbolos)
+    limpio = "".join(c for c in (nombre or "").upper() if c.isalnum())
+    base = limpio[:3] or "PRD"
+
+    # Si hay tipo, se le agrega su abreviatura de 3 letras
+    tipo_limpio = "".join(c for c in (tipo or "").upper() if c.isalnum())
+    if tipo_limpio:
+        base += "-" + tipo_limpio[:3]
+
+    # Se buscan los SKU que ya existen para este usuario con esta misma base
+    filas = conexion.execute(
+        "SELECT sku FROM productos WHERE usuario_id = %s AND sku LIKE %s",
+        (duenio, base + "-%"),
+    ).fetchall()
+
+    # Se guardan los números ya usados
+    numeros_usados = set()
+    for fila in filas:
+        sku_existente = fila[0] if fila else ""
+        if sku_existente and "-" in sku_existente:
+            try:
+                numeros_usados.add(int(sku_existente.rsplit("-", 1)[-1]))
+            except (ValueError, IndexError):
+                pass
+
+    # Se busca el primer número libre
+    contador = 1
+    while contador in numeros_usados:
+        contador += 1
+
+    return f"{base}-{contador:03d}"
+
+
+# ------------------------------------------------------------
 # POST /api/productos
 # Crea un producto nuevo en el inventario
 # ------------------------------------------------------------
@@ -133,6 +184,10 @@ def crear_producto():
     duenio = usuario_actual()
 
     with obtener_conexion() as conexion:
+        # Generar SKU automático si no se proporciona
+        if not sku:
+            sku = _generar_sku(conexion, nombre, tipo, duenio)
+        
         # RETURNING devuelve la fila ya guardada, sin necesidad de consultarla
         fila = conexion.execute(
             """
@@ -178,7 +233,7 @@ def editar_producto(id_producto: int):
     stock = datos.get("stock")
     tipo = a_texto(datos.get("tipo"))
     descripcion = a_texto(datos.get("descripcion"))
-    sku = a_texto(datos.get("sku"))
+    sku = a_texto(datos.get("sku"))  # Puede estar vacío, se generará automáticamente
 
     precio_ves = a_numero(datos.get("precio_ves"))
     precio_usd = a_numero(datos.get("precio_usd"))
