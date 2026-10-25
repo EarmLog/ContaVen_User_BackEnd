@@ -8,6 +8,8 @@ Endpoints:
   DELETE /api/productos/<id>   -> elimina un producto
 """
 
+import unicodedata
+
 from flask import Blueprint, jsonify, request
 
 from ..config import config
@@ -49,6 +51,13 @@ def listar_productos():
 # ------------------------------------------------------------
 # Generador de SKU automático
 # ------------------------------------------------------------
+def _limpiar_para_sku(texto):
+    """Deja solo letras y números sin acentos, para armar el SKU."""
+    sin_acentos = unicodedata.normalize("NFKD", texto or "")
+    sin_acentos = "".join(c for c in sin_acentos if not unicodedata.combining(c))
+    return "".join(c for c in sin_acentos.upper() if c.isalnum())
+
+
 def _generar_sku(conexion, nombre, tipo="", marca="", variante="", duenio=None):
     """
     Genera un SKU automático para un producto nuevo.
@@ -61,15 +70,15 @@ def _generar_sku(conexion, nombre, tipo="", marca="", variante="", duenio=None):
       - y un número consecutivo que crece con cada producto de la misma base.
     """
     # Se toman letras y números del nombre (se descartan espacios y símbolos)
-    limpio = "".join(c for c in (nombre or "").upper() if c.isalnum())
+    limpio = _limpiar_para_sku(nombre)
     base = limpio[:3] or "PRD"
 
     # Prioridad: marca -> variante -> tipo
-    extra = "".join(c for c in (marca or "").upper() if c.isalnum())
+    extra = _limpiar_para_sku(marca)
     if not extra:
-        extra = "".join(c for c in (variante or "").upper() if c.isalnum())
+        extra = _limpiar_para_sku(variante)
     if not extra:
-        extra = "".join(c for c in (tipo or "").upper() if c.isalnum())
+        extra = _limpiar_para_sku(tipo)
 
     if extra:
         base += "-" + extra[:3]
@@ -195,18 +204,18 @@ def crear_producto():
         fila = conexion.execute(
             """
             INSERT INTO productos (
-                usuario_id, nombre, stock, tipo, descripcion, sku,
+                usuario_id, nombre, stock, tipo, marca, variante, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
                 unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd,
                 descuento_unidad_porcentaje, descuento_unidad_desde, descuento_bulto_porcentaje
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
                 duenio,
-                nombre, stock_numero, tipo, descripcion, sku,
+                nombre, stock_numero, tipo, marca, variante, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
                 unidades_por_bulto, cantidad_mayor, precio_mayor_ves, precio_mayor_usd,
@@ -304,7 +313,8 @@ def editar_producto(id_producto: int):
         fila = conexion.execute(
             """
             UPDATE productos SET
-                nombre = %s, stock = %s, tipo = %s, descripcion = %s, sku = %s,
+                nombre = %s, stock = %s, tipo = %s, marca = %s, variante = %s,
+                descripcion = %s, sku = %s,
                 precio_ves = %s, precio_usd = %s,
                 precio_compra_ves = %s, precio_compra_usd = %s,
                 unidades_por_bulto = %s, cantidad_mayor = %s,
@@ -315,7 +325,7 @@ def editar_producto(id_producto: int):
             RETURNING *
             """,
             (
-                nombre, stock_numero, tipo, descripcion, sku,
+                nombre, stock_numero, tipo, marca, variante, descripcion, sku,
                 precio_ves, precio_usd,
                 precio_compra_ves, precio_compra_usd,
                 unidades_por_bulto, cantidad_mayor,
