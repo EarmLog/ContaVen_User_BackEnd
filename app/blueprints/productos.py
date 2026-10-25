@@ -49,29 +49,30 @@ def listar_productos():
 # ------------------------------------------------------------
 # Generador de SKU automático
 # ------------------------------------------------------------
-def _generar_sku(conexion, nombre, tipo="", duenio=None):
+def _generar_sku(conexion, nombre, tipo="", marca="", variante="", duenio=None):
     """
     Genera un SKU automático para un producto nuevo.
 
     El SKU se arma con:
       - las primeras 3 letras del nombre (sin espacios ni símbolos),
-      - las primeras 3 letras del tipo, si el producto tiene tipo,
+      - las primeras 3 letras de la marca, si existe,
+      - las primeras 3 letras de la variante, si existe,
+      - o las primeras 3 letras del tipo, si no hay marca/variante,
       - y un número consecutivo que crece con cada producto de la misma base.
-
-    Ejemplo: "Arroz" del tipo "Alimento" -> "ARR-ALI-001".
-    Si ya existe ARR-ALI-001, el nuevo será ARR-ALI-002.
-
-    El número se busca entre los SKU que ya tiene ese mismo usuario, así que
-    cada negocio lleva su propia numeración y nunca se repite dentro del suyo.
     """
     # Se toman letras y números del nombre (se descartan espacios y símbolos)
     limpio = "".join(c for c in (nombre or "").upper() if c.isalnum())
     base = limpio[:3] or "PRD"
 
-    # Si hay tipo, se le agrega su abreviatura de 3 letras
-    tipo_limpio = "".join(c for c in (tipo or "").upper() if c.isalnum())
-    if tipo_limpio:
-        base += "-" + tipo_limpio[:3]
+    # Prioridad: marca -> variante -> tipo
+    extra = "".join(c for c in (marca or "").upper() if c.isalnum())
+    if not extra:
+        extra = "".join(c for c in (variante or "").upper() if c.isalnum())
+    if not extra:
+        extra = "".join(c for c in (tipo or "").upper() if c.isalnum())
+
+    if extra:
+        base += "-" + extra[:3]
 
     # Se buscan los SKU que ya existen para este usuario con esta misma base
     filas = conexion.execute(
@@ -114,6 +115,8 @@ def crear_producto():
     nombre = a_texto(datos.get("nombre")) or ""
     stock = datos.get("stock")
     tipo = a_texto(datos.get("tipo"))
+    marca = a_texto(datos.get("marca"))
+    variante = a_texto(datos.get("variante"))
     descripcion = a_texto(datos.get("descripcion"))
     sku = a_texto(datos.get("sku"))
 
@@ -186,7 +189,7 @@ def crear_producto():
     with obtener_conexion() as conexion:
         # Generar SKU automático si no se proporciona
         if not sku:
-            sku = _generar_sku(conexion, nombre, tipo, duenio)
+            sku = _generar_sku(conexion, nombre, tipo, marca, variante, duenio)
         
         # RETURNING devuelve la fila ya guardada, sin necesidad de consultarla
         fila = conexion.execute(
@@ -232,6 +235,8 @@ def editar_producto(id_producto: int):
     nombre = a_texto(datos.get("nombre")) or ""
     stock = datos.get("stock")
     tipo = a_texto(datos.get("tipo"))
+    marca = a_texto(datos.get("marca"))
+    variante = a_texto(datos.get("variante"))
     descripcion = a_texto(datos.get("descripcion"))
     sku = a_texto(datos.get("sku"))  # Puede estar vacío, se generará automáticamente
 
