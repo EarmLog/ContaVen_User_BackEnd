@@ -299,6 +299,8 @@ def editar_producto(id_producto: int):
     duenio = usuario_actual()
 
     with obtener_conexion() as conexion:
+        if not sku:
+            sku = _generar_sku(conexion, nombre, tipo, marca, variante, duenio)
         fila = conexion.execute(
             """
             UPDATE productos SET
